@@ -78,4 +78,4 @@ Other free soft-core implementations of M68000 microprocessor include:
 * MC68000 - the original Motorola MC68000 processor.
 
 ## Structure diagram
-![Structure diagram](/doc/img/structure.png)
+![Structure diagram](http://github.com/alfikpl/ao68000/raw/master/doc/img/structure.png)
