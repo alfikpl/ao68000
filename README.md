@@ -61,6 +61,7 @@ Other free soft-core implementations of M68000 microprocessor include:
 * April 2010: Booted Linux kernel up to init process lookup,
 * December 2010: Runs as a processor in OpenCores aoOCS project,
 * January 2011: Core area optimization by over 33% (Thanks to Frederic Requin).
+* July 2011: Project copied to (https://github.com/alfikpl/ao68000). Further development of ao68000 will continue on github.
 
 ## Requirements
 * Icarus Verilog simulator (http://www.icarus.com/eda/verilog/) is required to compile the tb_ao68000
