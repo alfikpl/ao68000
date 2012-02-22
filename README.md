@@ -14,6 +14,10 @@ The OpenCores ao68000 IP Core is a Motorola MC68000 binary compatible processor.
   (http://developer.berlios.de/projects/doxverilog/). The specification is automatically extracted from the
   Doxygen HTML output.
 
+## License
+The OpenCores ao68000 IP Core is licensed under the Simplified BSD License. Works based on this project may be released under a proprietary license
+or as closed source software.
+
 ## WISHBONE compatibility
 * Version: WISHBONE specification Revision B.3,
 * General description: 32-bit WISHBONE Master interface,
