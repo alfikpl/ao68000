@@ -1743,6 +1743,16 @@ module registers(
 
 reg [31:0] pc_valid;
 
+wire [31:0] pc_next =
+    (pc_control == `PC_FROM_RESULT)?        result :
+    (pc_control == `PC_INCR_BY_2)?          pc + 32'd2 :
+    (pc_control == `PC_INCR_BY_4)?          pc + 32'd4 :
+    (pc_control == `PC_INCR_BY_SIZE)?       (size[2] == 1'b0) ? pc + 32'd2 : pc + 32'd4 :
+    (pc_control == `PC_FROM_PREFETCH_IR)?   prefetch_ir[47:16] :
+    (pc_control == `PC_INCR_BY_2_IN_MAIN_LOOP && prefetch_ir_valid == 1'b1 && decoder_trap == 8'd0 && stop_flag == 1'b0)?
+                                            pc + 32'd2 :
+                                            pc;
+
 // pc_change connected
 always @(posedge clock or negedge reset_n) begin
     if(reset_n == 1'b0) begin
@@ -1750,14 +1760,9 @@ always @(posedge clock or negedge reset_n) begin
         pc_valid <= 32'd0;
     end
     else begin
-        if(pc_control == `PC_FROM_RESULT)                       pc = result;
-        else if(pc_control == `PC_INCR_BY_2)                    pc = pc + 32'd2;
-        else if(pc_control == `PC_INCR_BY_4)                    pc = pc + 32'd4;
-        else if(pc_control == `PC_INCR_BY_SIZE)                 pc = (size[2] == 1'b0) ? pc + 32'd2 : pc + 32'd4;
-        else if(pc_control == `PC_FROM_PREFETCH_IR)             pc = prefetch_ir[47:16];
-        else if(pc_control == `PC_INCR_BY_2_IN_MAIN_LOOP && prefetch_ir_valid == 1'b1 && decoder_trap == 8'd0 && stop_flag == 1'b0)
-                                                                pc = pc + 32'd2;
-        if(pc[0] == 1'b0)  pc_valid <= pc;
+        pc <= pc_next;
+        
+        if(pc_next[0] == 1'b0)  pc_valid <= pc_next;
     end
 end
 
@@ -2752,14 +2757,155 @@ assign alu_mult_div_ready = (div_count == 5'd1 || div_count == 5'd0);
 
 //****************************************************** Altera-specific multiplication and division modules END
 
+wire [5:0]  result_ABCD_13_8a   = {1'b0, operand1[3:0]} + {1'b0, operand2[3:0]} + {4'b0, sr[4]};
+wire [5:0]  result_ABCD_19_14   = {1'b0, operand1[7:4]} + {1'b0, operand2[7:4]};
+wire [8:0]  result_ABCD_31_23   = operand1[7:0] + operand2[7:0] + {7'b0, sr[4]};
+wire [5:0]  result_ABCD_13_8b   = (result_ABCD_13_8a > 6'd9) ? (result_ABCD_13_8a + 6'd6) : result_ABCD_13_8a;
+
+wire [5:0]  result_SBCD_13_8a   = 6'd32 + {2'b0, operand1[3:0]} - {2'b0, operand2[3:0]} - {5'b0, sr[4]};
+wire [5:0]  result_SBCD_19_14   = 6'd32 + {2'b0, operand1[7:4]} - {2'b0, operand2[7:4]};
+wire [8:0]  result_SBCD_31_23   = operand1[7:0] - operand2[7:0] - {7'b0, sr[4]};
+wire [5:0]  result_SBCD_13_8b   = (result_SBCD_13_8a < 6'd32) ? (result_SBCD_13_8a - 6'd6) : result_SBCD_13_8a;
+
+wire [5:0]  result_ABCD2_19_14a = (result[13:8] > 6'h1F) ? (result[19:14] + 6'd2) :
+                                  (result[13:8] > 6'h0F) ? (result[19:14] + 6'd1) :
+                                  result[19:14];
+wire [5:0]  result_ABCD2_19_14b = (result_ABCD2_19_14a > 6'd9) ? (result_ABCD2_19_14a + 6'd6) : result_ABCD2_19_14a;
+wire [3:0]  result_ABCD2_7_4    = result_ABCD2_19_14b[3:0];
+wire [3:0]  result_ABCD2_3_0    = result[11:8];
+wire [31:0] result_ABCD2        = {result[31:20], result_ABCD2_19_14b, result[13:8], result_ABCD2_7_4, result_ABCD2_3_0};
+
+
+wire [5:0]  result_SBCD2_19_14a = (result[13:8] < 6'd16) ? (result[19:14] - 6'd2) :
+                                  (result[13:8] < 6'd32) ? (result[19:14] - 6'd1) :
+                                  result[19:14];
+wire [5:0]  result_SBCD2_19_14b = (result_SBCD2_19_14a < 6'd32 && result[31] == 1'b1) ? (result_SBCD2_19_14a - 6'd6) : result_SBCD2_19_14a;
+wire [3:0]  result_SBCD2_7_4    = result_SBCD2_19_14b[3:0];
+wire [3:0]  result_SBCD2_3_0    = result[11:8];
+wire [31:0] result_SBCD2        = {result[31:20], result_SBCD2_19_14b, result[13:8], result_SBCD2_7_4, result_SBCD2_3_0};
+
+wire [15:0] result_CHK          = operand1[15:0] - operand2[15:0];
+
+wire        result_BITS8_val    = ~(operand1[ operand2[2:0] ]);
+wire        result_BITS8_bit    = (ir[7:6] == 2'b01) ? result_BITS8_val : (ir[7:6] == 2'b10) ? 1'b0 : 1'b1;
+wire [31:0] result_BITS8        = { operand1[31:8],
+                                    (operand2[2:0] == 3'd7)? result_BITS8_bit : operand1[7],
+                                    (operand2[2:0] == 3'd6)? result_BITS8_bit : operand1[6],
+                                    (operand2[2:0] == 3'd5)? result_BITS8_bit : operand1[5],
+                                    (operand2[2:0] == 3'd4)? result_BITS8_bit : operand1[4],
+                                    (operand2[2:0] == 3'd3)? result_BITS8_bit : operand1[3],
+                                    (operand2[2:0] == 3'd2)? result_BITS8_bit : operand1[2],
+                                    (operand2[2:0] == 3'd1)? result_BITS8_bit : operand1[1],
+                                    (operand2[2:0] == 3'd0)? result_BITS8_bit : operand1[0] };
+
+wire        result_BITS32_val   = ~(operand1[ operand2[4:0] ]);
+wire        result_BITS32_bit   = (ir[7:6] == 2'b01) ? result_BITS32_val : (ir[7:6] == 2'b10) ? 1'b0 : 1'b1;
+wire [31:0] result_BITS32       = { (operand2[4:0] == 5'd31)? result_BITS32_bit : operand1[31],
+                                    (operand2[4:0] == 5'd30)? result_BITS32_bit : operand1[30],
+                                    (operand2[4:0] == 5'd29)? result_BITS32_bit : operand1[29],
+                                    (operand2[4:0] == 5'd28)? result_BITS32_bit : operand1[28],
+                                    (operand2[4:0] == 5'd27)? result_BITS32_bit : operand1[27],
+                                    (operand2[4:0] == 5'd26)? result_BITS32_bit : operand1[26],
+                                    (operand2[4:0] == 5'd25)? result_BITS32_bit : operand1[25],
+                                    (operand2[4:0] == 5'd24)? result_BITS32_bit : operand1[24],
+                                    (operand2[4:0] == 5'd23)? result_BITS32_bit : operand1[23],
+                                    (operand2[4:0] == 5'd22)? result_BITS32_bit : operand1[22],
+                                    (operand2[4:0] == 5'd21)? result_BITS32_bit : operand1[21],
+                                    (operand2[4:0] == 5'd20)? result_BITS32_bit : operand1[20],
+                                    (operand2[4:0] == 5'd19)? result_BITS32_bit : operand1[19],
+                                    (operand2[4:0] == 5'd18)? result_BITS32_bit : operand1[18],
+                                    (operand2[4:0] == 5'd17)? result_BITS32_bit : operand1[17],
+                                    (operand2[4:0] == 5'd16)? result_BITS32_bit : operand1[16],
+                                    (operand2[4:0] == 5'd15)? result_BITS32_bit : operand1[15],
+                                    (operand2[4:0] == 5'd14)? result_BITS32_bit : operand1[14],
+                                    (operand2[4:0] == 5'd13)? result_BITS32_bit : operand1[13],
+                                    (operand2[4:0] == 5'd12)? result_BITS32_bit : operand1[12],
+                                    (operand2[4:0] == 5'd11)? result_BITS32_bit : operand1[11],
+                                    (operand2[4:0] == 5'd10)? result_BITS32_bit : operand1[10],
+                                    (operand2[4:0] == 5'd9 )? result_BITS32_bit : operand1[9 ],
+                                    (operand2[4:0] == 5'd8 )? result_BITS32_bit : operand1[8 ],
+                                    (operand2[4:0] == 5'd7 )? result_BITS32_bit : operand1[7 ],
+                                    (operand2[4:0] == 5'd6 )? result_BITS32_bit : operand1[6 ],
+                                    (operand2[4:0] == 5'd5 )? result_BITS32_bit : operand1[5 ],
+                                    (operand2[4:0] == 5'd4 )? result_BITS32_bit : operand1[4 ],
+                                    (operand2[4:0] == 5'd3 )? result_BITS32_bit : operand1[3 ],
+                                    (operand2[4:0] == 5'd2 )? result_BITS32_bit : operand1[2 ],
+                                    (operand2[4:0] == 5'd1 )? result_BITS32_bit : operand1[1 ],
+                                    (operand2[4:0] == 5'd0 )? result_BITS32_bit : operand1[0 ] };
+
+wire [4:0]  result_NBCD_3_0a    = 5'd25 - operand1[3:0];
+wire [4:0]  result_NBCD_7_4a    = (operand1[3:0] > 4'd9) ? (5'd24 - operand1[7:4]) : (5'd25 - operand1[7:4]);
+
+wire [3:0]  result_NBCD_3_0b    =   (sr[4] == 1'b0 && result_NBCD_3_0a[3:0] == 4'd9 && result_NBCD_7_4a[3:0] == 4'd9)?      4'd0 :
+                                    (sr[4] == 1'b0 && (result_NBCD_3_0a[3:0] == 4'd9 || result_NBCD_3_0a[3:0] == 4'd15))?   4'd0 :
+                                    (sr[4] == 1'b0)?                                                                        result_NBCD_3_0a[3:0] + 4'd1 :
+                                                                                                                            result_NBCD_3_0a[3:0];
+wire [3:0]  result_NBCD_7_4b    =   (sr[4] == 1'b0 && result_NBCD_3_0a[3:0] == 4'd9 && result_NBCD_7_4a[3:0] == 4'd9)?      4'd0 :
+                                    (sr[4] == 1'b0 && (result_NBCD_3_0a[3:0] == 4'd9 || result_NBCD_3_0a[3:0] == 4'd15))?   result_NBCD_7_4a[3:0] + 4'd1 :
+                                                                                                                            result_NBCD_7_4a[3:0];
+                                                                                                                
+wire [31:0] result_blocking =
+    // OR,OR to mem,OR to Dn
+    (alu_control == `ALU_ARITHMETIC_LOGIC && decoder_alu_reg[0])?                               operand1[31:0] | operand2[31:0] :
+    // AND,AND to mem,AND to Dn
+    (alu_control == `ALU_ARITHMETIC_LOGIC && decoder_alu_reg[1])?                               operand1[31:0] & operand2[31:0] :
+    // EORI,EOR
+    (alu_control == `ALU_ARITHMETIC_LOGIC && decoder_alu_reg[2])?                               operand1[31:0] ^ operand2[31:0] :
+    // ADD,ADD to mem,ADD to Dn,ADDQ
+    (alu_control == `ALU_ARITHMETIC_LOGIC && decoder_alu_reg[3])?                               operand1[31:0] + operand2[31:0] :
+    // SUBI,CMPI,CMPM,SUB to mem,SUB to Dn,CMP,SUBQ
+    (alu_control == `ALU_ARITHMETIC_LOGIC && (decoder_alu_reg[4] | decoder_alu_reg[5]))?        operand1[31:0] - operand2[31:0] :
+    // ABCD
+    (alu_control == `ALU_ABCD_SBCD_ADDX_SUBX_prepare && ir[14:12] == 3'b100)?                   { result_ABCD_31_23, result[22:20], result_ABCD_19_14, result_ABCD_13_8b, result[7:0] } :
+    // SBCD
+    (alu_control == `ALU_ABCD_SBCD_ADDX_SUBX_prepare && ir[14:12] == 3'b000)?                   { result_SBCD_31_23, result[22:20], result_SBCD_19_14, result_SBCD_13_8b, result[7:0] } :
+    // ABCD2
+    (alu_control == `ALU_ABCD_SBCD_ADDX_SUBX && ir[14:12] == 3'b100)?                           result_ABCD2 :
+    // SBCD2
+    (alu_control == `ALU_ABCD_SBCD_ADDX_SUBX && ir[14:12] == 3'b000)?                           result_SBCD2 :
+    // ADDX
+    (alu_control == `ALU_ABCD_SBCD_ADDX_SUBX && ir[14:12] == 3'b101)?                           operand1[31:0] + operand2[31:0] + sr[4] :
+    // SUBX
+    (alu_control == `ALU_ABCD_SBCD_ADDX_SUBX && ir[14:12] == 3'b001)?                           operand1[31:0] - operand2[31:0] - sr[4] :
+    // shift/rotate prepare
+    (alu_control == `ALU_ASL_LSL_ROL_ROXL_ASR_LSR_ROR_ROXR_prepare)?                            operand1[31:0] :
+    // ASL / LSL / ROL / ROXL
+    (alu_control == `ALU_ASL_LSL_ROL_ROXL_ASR_LSR_ROR_ROXR && 
+        (decoder_alu_reg[8] | decoder_alu_reg[9] | decoder_alu_reg[10] | decoder_alu_reg[11]))? {operand1[30:0], lbit} :
+    // ASR / LSR / ROR / ROXR
+    (alu_control == `ALU_ASL_LSL_ROL_ROXL_ASR_LSR_ROR_ROXR)?                                    {rbit, operand1[31:17], (size[1]) ? rbit : operand1[16], operand1[15:9],
+                                                                                                 (size[0]) ? rbit : operand1[8], operand1[7:1] } :
+    // MOVE
+    (alu_control == `ALU_MOVE)?                                                                 operand1 :
+    // ADDA,ADDQ
+    (alu_control == `ALU_ADDA_SUBA_CMPA_ADDQ_SUBQ && decoder_alu_reg[6])?                       operand1[31:0] + operand2[31:0] :
+    // SUBA,CMPA,SUBQ
+    (alu_control == `ALU_ADDA_SUBA_CMPA_ADDQ_SUBQ)?                                             operand1[31:0] - operand2[31:0] :
+    // CHK
+    (alu_control == `ALU_CHK)?                                                                  { result[31:16], result_CHK } :
+    // NEGX / CLR / NEG / NOT
+    (alu_control == `ALU_NEGX_CLR_NEG_NOT_NBCD_SWAP_EXT &&
+     ((ir[11:8] == 4'b0000) || (ir[11:8] == 4'b0010) || (ir[11:8] == 4'b0100) || (ir[11:8] == 4'b0110)))? 
+                                                                                                32'b0 - (operand1[31:0] & {32{ir[10] | ~ir[9]}}) - ((sr[4] & ~ir[10] & ~ir[9]) | (ir[10] & ir[9])) :
+    // NBCD
+    (alu_control == `ALU_NEGX_CLR_NEG_NOT_NBCD_SWAP_EXT && ir[11:6] == 6'b1000_00)?             { result[31:8], result_NBCD_7_4b, result_NBCD_3_0b } :
+    // SWAP
+    (alu_control == `ALU_NEGX_CLR_NEG_NOT_NBCD_SWAP_EXT && ir[11:6] == 6'b1000_01)?             { operand1[15:0], operand1[31:16] } :
+    // EXT byte to word
+    (alu_control == `ALU_NEGX_CLR_NEG_NOT_NBCD_SWAP_EXT && ir[11:6] == 6'b1000_10)?             { result[31:16], {8{operand1[7]}}, operand1[7:0] } :
+    // EXT word to long
+    (alu_control == `ALU_NEGX_CLR_NEG_NOT_NBCD_SWAP_EXT && ir[11:6] == 6'b1000_11)?             { {16{operand1[15]}}, operand1[15:0] } :
+    // else
+                                                                                                result[31:0];
+ 
 // ALU internal defines
-`define Sm ((size[0] == 1'b1) ? operand2[7] :           (size[1] == 1'b1) ? operand2[15] :            operand2[31])
+`define Sm ((size[0] == 1'b1) ? operand2[7] :                   (size[1] == 1'b1) ? operand2[15] :                      operand2[31])
 
-`define Dm ((size[0] == 1'b1) ? operand1[7] :           (size[1] == 1'b1) ? operand1[15] :            operand1[31])
+`define Dm ((size[0] == 1'b1) ? operand1[7] :                   (size[1] == 1'b1) ? operand1[15] :                      operand1[31])
 
-`define Rm ((size[0] == 1'b1) ? result[7] :             (size[1] == 1'b1) ? result[15] :              result[31])
+`define Rm ((size[0] == 1'b1) ? result_blocking[7] :            (size[1] == 1'b1) ? result_blocking[15] :               result_blocking[31])
 
-`define Z  ((size[0] == 1'b1) ? (result[7:0] == 8'b0) : (size[1] == 1'b1) ? (result[15:0] == 16'b0) : (result[31:0] == 32'b0))
+`define Z  ((size[0] == 1'b1) ? (result_blocking[7:0] == 8'b0) :(size[1] == 1'b1) ? (result_blocking[15:0] == 16'b0) :  (result_blocking[31:0] == 32'b0))
 
 // ALU operations
 
@@ -2771,6 +2917,7 @@ wire lbit = (`Dm & decoder_alu_reg[10]) | (sr[4] & decoder_alu_reg[11]);
 // Bit being shifted right
 wire rbit = (`Dm & decoder_alu_reg[12]) | (operand1[0] & decoder_alu_reg[14]) | (sr[4] & decoder_alu_reg[15]);
 
+   
 always @(posedge clock or negedge reset_n) begin
     if(reset_n == 1'b0) begin
         sr                  <= { 1'b0, 1'b0, 1'b1, 2'b0, 3'b111, 8'b0 };
@@ -2847,17 +2994,8 @@ always @(posedge clock or negedge reset_n) begin
             end
 
             `ALU_ARITHMETIC_LOGIC: begin
-
-                // OR,OR to mem,OR to Dn
-                if(decoder_alu_reg[0])                              result[31:0] = operand1[31:0] | operand2[31:0];
-                // AND,AND to mem,AND to Dn
-                else if(decoder_alu_reg[1])                         result[31:0] = operand1[31:0] & operand2[31:0];
-                // EORI,EOR
-                else if(decoder_alu_reg[2])                         result[31:0] = operand1[31:0] ^ operand2[31:0];
-                // ADD,ADD to mem,ADD to Dn,ADDQ
-                else if(decoder_alu_reg[3])                         result[31:0] = operand1[31:0] + operand2[31:0];
-                // SUBI,CMPI,CMPM,SUB to mem,SUB to Dn,CMP,SUBQ
-                else if(decoder_alu_reg[4] | decoder_alu_reg[5])    result[31:0] = operand1[31:0] - operand2[31:0];
+                
+                result <= result_blocking;
 
                 // Z
                 sr[2] <= `Z;
@@ -2895,66 +3033,37 @@ always @(posedge clock or negedge reset_n) begin
             end
             
             `ALU_ABCD_SBCD_ADDX_SUBX_prepare: begin
-                // ABCD
-                if( ir[14:12] == 3'b100) begin
-                    result[13:8] = {1'b0, operand1[3:0]} + {1'b0, operand2[3:0]} + {4'b0, sr[4]};
-                    result[19:14] = {1'b0, operand1[7:4]} + {1'b0, operand2[7:4]};
-                    
-                    result[31:23] = operand1[7:0] + operand2[7:0] + {7'b0, sr[4]};
-                    
-                    result[13:8] = (result[13:8] > 6'd9) ? (result[13:8] + 6'd6) : result[13:8];
-                end
-                // SBCD
-                else if( ir[14:12] == 3'b000 ) begin
-                    result[13:8] = 6'd32 + {2'b0, operand1[3:0]} - {2'b0, operand2[3:0]} - {5'b0, sr[4]};
-                    result[19:14] = 6'd32 + {2'b0, operand1[7:4]} - {2'b0, operand2[7:4]};
-                    
-                    result[31:23] = operand1[7:0] - operand2[7:0] - {7'b0, sr[4]};
-                    
-                    result[13:8] = (result[13:8] < 6'd32) ? (result[13:8] - 6'd6) : result[13:8];
-                end
+                result <= result_blocking;
             end
             
             `ALU_ABCD_SBCD_ADDX_SUBX: begin
                 // ABCD
                 if( ir[14:12] == 3'b100) begin
-                    result[19:14] = (result[13:8] > 6'h1F) ? (result[19:14] + 6'd2) :
-                                    (result[13:8] > 6'h0F) ? (result[19:14] + 6'd1) :
-                                    result[19:14];
-                    result[19:14] = (result[19:14] > 6'd9) ? (result[19:14] + 6'd6) : result[19:14];
-                    
-                    result[7:4] = result[17:14];
-                    result[3:0] = result[11:8];
+                    result <= result_ABCD2;
 
                     // C
-                    sr[0] <= (result[19:14] > 6'd9) ? 1'b1 : 1'b0;
+                    sr[0] <= (result_ABCD2[19:14] > 6'd9) ? 1'b1 : 1'b0;
                     // X = C
-                    sr[4] <= (result[19:14] > 6'd9) ? 1'b1 : 1'b0;
+                    sr[4] <= (result_ABCD2[19:14] > 6'd9) ? 1'b1 : 1'b0;
                     
                     // V
-                    sr[1] <= (result[30] == 1'b0 && result[7] == 1'b1) ? 1'b1 : 1'b0;
+                    sr[1] <= (result_ABCD2[30] == 1'b0 && result_ABCD2[7] == 1'b1) ? 1'b1 : 1'b0;
                 end
                 // SBCD
                 else if( ir[14:12] == 3'b000 ) begin
-                    result[19:14] = (result[13:8] < 6'd16) ? (result[19:14] - 6'd2) :
-                                    (result[13:8] < 6'd32) ? (result[19:14] - 6'd1) :
-                                    result[19:14];
-                    result[19:14] = (result[19:14] < 6'd32 && result[31] == 1'b1) ? (result[19:14] - 6'd6) : result[19:14];
-                    
-                    result[7:4] = result[17:14];
-                    result[3:0] = result[11:8];
-                
+                    result <= result_SBCD2;
+
                     // C
-                    sr[0] <= (result[19:14] < 6'd32) ? 1'b1 : 1'b0;
+                    sr[0] <= (result_SBCD2[19:14] < 6'd32) ? 1'b1 : 1'b0;
                     // X = C
-                    sr[4] <= (result[19:14] < 6'd32) ? 1'b1 : 1'b0;
+                    sr[4] <= (result_SBCD2[19:14] < 6'd32) ? 1'b1 : 1'b0;
                     
                     // V
-                    sr[1] <= (result[30] == 1'b1 && result[7] == 1'b0) ? 1'b1 : 1'b0;
+                    sr[1] <= (result_SBCD2[30] == 1'b1 && result_SBCD2[7] == 1'b0) ? 1'b1 : 1'b0;
                 end
                 // ADDX
                 else if( ir[14:12] == 3'b101 ) begin
-                    result[31:0] = operand1[31:0] + operand2[31:0] + sr[4];
+                    result <= result_blocking;
                     
                     // C,X,V
                     sr[0] <= (`Sm & `Dm) | (~`Rm & `Dm) | (`Sm & ~`Rm);
@@ -2963,7 +3072,7 @@ always @(posedge clock or negedge reset_n) begin
                 end
                 // SUBX
                 else if( ir[14:12] == 3'b001 ) begin
-                    result[31:0] = operand1[31:0] - operand2[31:0] - sr[4];
+                    result[31:0] <= result_blocking;
                     
                     // C,X,V
                     sr[0] <= (`Sm & ~`Dm) | (`Rm & ~`Dm) | (`Sm & `Rm);
@@ -2976,11 +3085,11 @@ always @(posedge clock or negedge reset_n) begin
                 // N
                 sr[3] <= `Rm;
             end
-
+            
             `ALU_ASL_LSL_ROL_ROXL_ASR_LSR_ROR_ROXR_prepare: begin
                 // 32-bit load even for 8-bit and 16-bit operations
                 // The extra bits will be anyway discarded during register / memory write
-                result[31:0] = operand1[31:0];
+                result[31:0] <= result_blocking;
                 
                 // V cleared
                 sr[1] <= 1'b0;
@@ -2997,12 +3106,12 @@ always @(posedge clock or negedge reset_n) begin
                 sr[3] <= `Rm;
                 // Z set
                 sr[2] <= `Z;
-            end
-
+            end 
+            
             `ALU_ASL_LSL_ROL_ROXL_ASR_LSR_ROR_ROXR: begin
                 // ASL / LSL / ROL / ROXL
                 if (decoder_alu_reg[8] | decoder_alu_reg[9] | decoder_alu_reg[10] | decoder_alu_reg[11]) begin
-                    result[31:0] = {operand1[30:0], lbit};
+                    result[31:0] <= result_blocking;
 
                     sr[0] <= `Dm; // C for ASL / LSL / ROL / ROXL
                     if (decoder_alu_reg[8])
@@ -3014,12 +3123,7 @@ always @(posedge clock or negedge reset_n) begin
                 end
                 // ASR / LSR / ROR / ROXR
                 else begin
-                    result[6:0]   = operand1[7:1];
-                    result[7]     = (size[0]) ? rbit : operand1[8];
-                    result[14:8]  = operand1[15:9];
-                    result[15]    = (size[1]) ? rbit : operand1[16];
-                    result[30:16] = operand1[31:17];
-                    result[31]    = rbit;
+                    result[31:0] <= result_blocking;
                     sr[0] <= operand1[0]; // C for ASR / LSR / ROR / ROXR
                     sr[1] <= 1'b0;        // V for ASR / LSR / ROR / ROXR
                     if (!decoder_alu_reg[14]) sr[4] <= operand1[0]; // X for ASR / LSR / ROXR
@@ -3030,9 +3134,10 @@ always @(posedge clock or negedge reset_n) begin
                 // Z set
                 sr[2] <= `Z;
             end
-
+    
+    
             `ALU_MOVE: begin
-                result = operand1;
+                result <= result_blocking;
 
                 // X not affected
                 // C cleared
@@ -3045,7 +3150,7 @@ always @(posedge clock or negedge reset_n) begin
                 // Z set
                 sr[2] <= `Z;
             end
-
+    
             `ALU_ADDA_SUBA_CMPA_ADDQ_SUBQ: begin
                 // ADDA: 1101
                 // CMPA: 1011
@@ -3053,11 +3158,8 @@ always @(posedge clock or negedge reset_n) begin
                 // ADDQ,SUBQ: 0101 xxx0,1
                 // operation requires that operand2 was sign extended
                 
-                // ADDA,ADDQ
-                if(decoder_alu_reg[6])  result[31:0] = operand1[31:0] + operand2[31:0];
-                // SUBA,CMPA,SUBQ
-                else                    result[31:0] = operand1[31:0] - operand2[31:0];
-
+                result[31:0] <= result_blocking;
+                
                 // for CMPA
                 if( ir[15:12] == 4'b1011 ) begin
                     // Z
@@ -3074,7 +3176,7 @@ always @(posedge clock or negedge reset_n) begin
             end
 
             `ALU_CHK: begin
-                result[15:0] = operand1[15:0] - operand2[15:0];
+                result <= result_blocking;
                 
                 // undocumented behavior: Z flag, see 68knotes.txt
                 //sr[2] <= (operand1[15:0] == 16'b0) ? 1'b1 : 1'b0;
@@ -3108,7 +3210,7 @@ always @(posedge clock or negedge reset_n) begin
 
                 // X not affected
             end
-
+            
             `ALU_MULS_MULU_DIVS_DIVU: begin
 
                 // division by 0
@@ -3178,24 +3280,21 @@ always @(posedge clock or negedge reset_n) begin
                 end
             end
 
-
             `ALU_BCHG_BCLR_BSET_BTST: begin // 97 LE
                 // byte
                 if( ir[5:3] != 3'b000 ) begin
-                    sr[2] <= ~(operand1[ operand2[2:0] ]);
-                    result = operand1;
-                    result[ operand2[2:0] ] = (ir[7:6] == 2'b01) ? ~(operand1[ operand2[2:0] ]) : (ir[7:6] == 2'b10) ? 1'b0 : 1'b1;
+                    sr[2] <= result_BITS8_val;
+                    result <= result_BITS8;
                 end
                 // long
                 else if( ir[5:3] == 3'b000 ) begin
-                    sr[2] <= ~(operand1[ operand2[4:0] ]);
-                    result = operand1;
-                    result[ operand2[4:0] ] = (ir[7:6] == 2'b01) ? ~(operand1[ operand2[4:0] ]) : (ir[7:6] == 2'b10) ? 1'b0 : 1'b1;
+                    sr[2] <= result_BITS32_val;
+                    result <= result_BITS32;
                 end
 
                 // C,V,N,X not affected
             end
-
+            
             `ALU_TAS: begin
                 result[7:0] <= { 1'b1, operand1[6:0] };
 
@@ -3216,23 +3315,10 @@ always @(posedge clock or negedge reset_n) begin
                 // NEGX / CLR / NEG / NOT
                 // Optimization thanks to Frederic Requin
                 if ((ir[11:8] == 4'b0000) || (ir[11:8] == 4'b0010) || (ir[11:8] == 4'b0100) || (ir[11:8] == 4'b0110))
-                    result = 32'b0 - (operand1[31:0] & {32{ir[10] | ~ir[9]}}) - ((sr[4] & ~ir[10] & ~ir[9]) | (ir[10] & ir[9]));
+                    result <= result_blocking;
                 // NBCD
                 else if( ir[11:6] == 6'b1000_00 ) begin
-                    result[3:0] = 5'd25 - operand1[3:0];
-                    result[7:4] = (operand1[3:0] > 4'd9) ? (5'd24 - operand1[7:4]) : (5'd25 - operand1[7:4]);
-                    
-                    if(sr[4] == 1'b0 && result[3:0] == 4'd9 && result[7:4] == 4'd9) begin
-                        result[3:0] = 4'd0;
-                        result[7:4] = 4'd0;
-                    end
-                    else if(sr[4] == 1'b0 && (result[3:0] == 4'd9 || result[3:0] == 4'd15)) begin
-                        result[3:0] = 4'd0;
-                        result[7:4] = result[7:4] + 4'd1;
-                    end
-                    else if(sr[4] == 1'b0) begin
-                        result[3:0] = result[3:0] + 4'd1;
-                    end
+                    result <= result_blocking;
                     
                     //V undefined: unchanged
                     //Z
@@ -3242,11 +3328,11 @@ always @(posedge clock or negedge reset_n) begin
                     sr[4] <= (operand1[7:0] == 8'd0 && sr[4] == 1'b0) ? 1'b0 : 1'b1; //=C
                 end
                 // SWAP
-                else if( ir[11:6] == 6'b1000_01 ) result = { operand1[15:0], operand1[31:16] };
+                else if( ir[11:6] == 6'b1000_01 ) result <= result_blocking;
                 // EXT byte to word
-                else if( ir[11:6] == 6'b1000_10 ) result = { result[31:16], {8{operand1[7]}}, operand1[7:0] };
+                else if( ir[11:6] == 6'b1000_10 ) result <= result_blocking;
                 // EXT word to long
-                else if( ir[11:6] == 6'b1000_11 ) result = { {16{operand1[15]}}, operand1[15:0] };
+                else if( ir[11:6] == 6'b1000_11 ) result <= result_blocking;
 
                 // N set if negative else clear
                 sr[3] <= `Rm;
